@@ -15,16 +15,16 @@ type ParsedTransactions = Array<Record<string, number | string | undefined | nul
 function parseRow(name: string, value?: string) {
   const normalizedName = name.toLowerCase();
   // Assumes 3,000.00 -> 3000.00. Will break for some locales
-  const normalizeAmount = (amount: string) => amount.replace('$', '').replace(',', '');
+  const normalizeAmount = (amount: string) => amount.replace('$', '').replace(',', '').replace('−', '-');
   const parseCurrencyValue = (value: string) => {
-    const split = value?.split(' ') ?? [];
-    if (split.length < 3) {
-      const [amount, currency] = split;
-      const sign = amount.indexOf('−') > -1 ? '−' : '+';
-      return { amount: parseFloat(normalizeAmount(amount)) * (sign === '−' ? -1 : 1), currency };
-    }
-    const [sign, amount, currency] = split;
-    return { amount: parseFloat(normalizeAmount(amount)) * (sign === '−' ? -1 : 1), currency };
+    // Matches: optional sign, optional $, number, optional currency
+    // Examples: "− $2.30", "$10.30", "+ $5.00 CAD", "− 20.00 EUR"
+    const match = value.match(/([−-])?\s*\$?([\d.,]+)\s*([A-Z]{3})?/);
+    if (!match) return { amount: null, currency: undefined };
+    const sign = match[1] === '−' || match[1] === '-' ? -1 : 1;
+    const amount = parseFloat(match[2].replace(',', ''));
+    const currency = match[3] || (value.includes('$') ? 'CAD' : undefined); // fallback if needed
+    return { amount: amount * sign, currency };
   };
   if (normalizedName === 'account') {
     return { account: value };
@@ -42,12 +42,22 @@ function parseRow(name: string, value?: string) {
     if (!value) {
       return {};
     }
-    const date = parse(value, 'MMMM d, yyyyh:mm a', new Date());
+    // Normalize: replace all whitespace with a space, and ensure space after year
+    let normalizedValue = value
+      .replace(/\s+/g, ' ')
+      .replace(/(\d{4})\s*(\d)/, '$1 $2')
+      .trim();
+
+    let date = parse(normalizedValue, 'MMMM d, yyyy h:mm a', new Date());
+    if (!isValid(date)) {
+      date = parse(normalizedValue, 'MMMM d, yyyyh:mm a', new Date());
+    }
     if (isValid(date)) {
       return { date: date.toISOString() };
     }
 
-    const date2 = parse(value, 'MMMM d, yyyy', new Date());
+    // Try date only
+    const date2 = parse(normalizedValue, 'MMMM d, yyyy', new Date());
     if (isValid(date2)) {
       return { date: date2.toISOString() };
     }
@@ -201,7 +211,6 @@ export async function exportTransactions() {
   // Find the transaction details are which seems to have a role of region
   const role = 'region';
   const roleElement = document.querySelectorAll(`[role="${role}"]`);
-
   const result: ParsedTransactions = Array.from(roleElement).map(processTransactionDetails);
   const csv = parsedTransactionsToCsv(result);
   await downloadCsv(`ws-exporter-${new Date().toISOString()}.csv`, csv);
